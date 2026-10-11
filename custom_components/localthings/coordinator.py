@@ -85,9 +85,11 @@ from .registry.entities import ClimateDesc
 from .registry.identity import (
     DeviceIdentity,
     device_display_name,
+    display_serial,
     ocf_device_key,
     proven_ocf_device_id,
     read_identity,
+    resolve_firmware,
     resolve_mac,
     resolve_model,
     resolve_serial,
@@ -1004,7 +1006,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Identifiers derive from the master's serial plus this subdevice's
         stable key, never the subdevice's own reported serial -- deterministic
         across reconnects regardless of whether its identity resource
-        answered yet. `serial_number` is set from it when present anyway,
+        answered yet. `serial_number` is set from it when it is a real one,
         but is informational only, not an identifier.
         """
         if subdevice.kind == "main":
@@ -1017,7 +1019,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model = self._device_model(subdevice, resources) or (
             model_num.split("|", 1)[0] if model_num else ""
         )
-        serial = info.get("x.com.samsung.da.serialNum") or None
+        serial = display_serial(info.get("x.com.samsung.da.serialNum"))
         base_name = self.device_info.get("name") or "Samsung Appliance"
         if cavity := _cavity_label(resources):
             # A dual-cavity oven reports the same modelNum on both cavities
@@ -1045,8 +1047,11 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name=f"{base_name} {label}",
             manufacturer=self.device_info.get("manufacturer") or "Samsung",
             model=model or None,
-            serial_number=serial,
         )
+        if serial:
+            # As on the main card: a placeholder isn't shown, and a key left
+            # out keeps what the registry has.
+            info["serial_number"] = serial
         set_via_device(self.hass, self._entry.entry_id, info, (DOMAIN, self.device_key))
         return info
 
@@ -2046,6 +2051,14 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             manufacturer=mfr,
             model=model,
         )
+        if adopted:
+            # Only what the device reported: a key left out keeps the
+            # registry's value, where None would clear it. The polled serial,
+            # not `serial`, which can be the host fallback.
+            if serial_number := display_serial(info.get("x.com.samsung.da.serialNum")):
+                self.device_info["serial_number"] = serial_number
+            if firmware := resolve_firmware(ident):
+                self.device_info["sw_version"] = firmware
         # A snapshot replay passes None: it never reached the device, so
         # writing a key here would freeze a pre-v4 entry's legacy key in as
         # if a poll had confirmed it, and the real UUID would later look
