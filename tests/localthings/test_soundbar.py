@@ -184,25 +184,6 @@ async def test_psk_entry_polls_flat(hass: HomeAssistant) -> None:
     assert not _SKIP_EXACT & set(session.reads)
 
 
-async def test_device_registry_carries_firmware_but_no_uuid_serial(
-    hass: HomeAssistant,
-) -> None:
-    """Firmware from /oic/p lands on the card; the OCF per-unit UUID is
-    NOT a serial (an AV board has none -- resolve_serial's host fallback
-    is an address, not identity) and must not surface as one."""
-    from homeassistant.helpers import device_registry as dr
-
-    entry = _mock_entry(hass)
-    await _setup_soundbar(hass, entry)
-    device = next(
-        row
-        for row in dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
-        if row.model == "HW-TEST"
-    )
-    assert device.sw_version == "HW-TESTWWB-1000.0"
-    assert device.serial_number is None
-
-
 async def test_standalone_entities_register(hass: HomeAssistant) -> None:
     entry = _mock_entry(hass)
     await _setup_soundbar(hass, entry)

@@ -87,11 +87,9 @@ from .registry.flat import FLAT_TIMEOUT_S, iter_resources, read_all
 from .registry.identity import (
     DeviceIdentity,
     device_display_name,
-    display_serial,
     ocf_device_key,
     proven_ocf_device_id,
     read_identity,
-    resolve_firmware,
     resolve_mac,
     resolve_model,
     resolve_serial,
@@ -2146,14 +2144,6 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             manufacturer=mfr,
             model=model,
         )
-        if adopted:
-            # Like the MAC; left out otherwise rather than None, which would
-            # clear what the registry has. The polled serial rather than
-            # `serial`, which can be a stored host fallback.
-            self.device_info["serial_number"] = display_serial(
-                info.get("x.com.samsung.da.serialNum")
-            )
-            self.device_info["sw_version"] = resolve_firmware(ident)
         # A snapshot replay passes None: it never reached the device, so
         # writing a key here would freeze a pre-v4 entry's legacy key in as
         # if a poll had confirmed it, and the real UUID would later look
