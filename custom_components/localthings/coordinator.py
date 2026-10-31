@@ -1468,15 +1468,16 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Asked once per coordinator start (_read_mode_checked), on the first
         poll that has a session. Only that answer moves the entry back to
-        the Collection (_persist_read_mode): a 4.04, no answer or an error
-        keeps it per href, so a board that is off at startup stays so.
+        the Collection (_persist_read_mode): a 4.04, no answer, an error or an
+        empty Collection keeps it per href, so a board that is off at
+        startup stays so.
         """
         try:
             code, body = sess.read(_SEED_PATH, timeout=self._READ_MODE_CHECK_TIMEOUT_S)
         except Exception as e:
             self._log.debug("/device/0 check: %s", e)
             return False
-        if code != 0x45 or not isinstance(body, list):
+        if code != 0x45 or not isinstance(body, list) or not parse_device0_batch(body):
             return False
         self._log.info("/device/0 answered 2.05; polling the Collection again")
         return True
@@ -1514,6 +1515,8 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     timeout=self._FLAT_TIMEOUT_S,
                     budget=self._FLAT_BUDGET_S,
                     logger=self._log,
+                    # async_close drops the session without the lock.
+                    stop=lambda: self._session is not sess,
                 )
             )
         if not results:

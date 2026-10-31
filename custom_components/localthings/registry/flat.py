@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 # Reps answer in milliseconds; the timeout only matters for advertised hrefs
 # that never answer (the soundbar's Alexa sub-resources).
 FLAT_TIMEOUT_S = 2.5
-# The first full read must outlast those (a soundbar's Alexa sign-in
-# sub-resources): an href it misses never gets entities.
+# The first full read must outlast those: an href it misses gets no
+# entities until a later discovery reads it.
 FLAT_ENUMERATION_BUDGET_S = 60.0
 
 # Never read: the onboarding resources (tokens, a paired phone, nearby

@@ -9,7 +9,7 @@ the one GET it makes each time it starts.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -39,14 +39,23 @@ def _coordinator(hass: HomeAssistant, **extra) -> LocalThingsCoordinator:
     return coordinator
 
 
+_COLLECTION = [{"rt": ["x.com.samsung.devcol"]}, {"href": "/sec/audio", "rep": {"volume": 3}}]
+
+
 class _Batch(FakeFlatSession):
-    """/device/0 answers 2.05 after all (an empty Collection will do)."""
+    """/device/0 answers 2.05 after all."""
+
+    collection: ClassVar[list] = _COLLECTION
 
     def read(self, path, timeout=None):
         if list(path) == ["device", "0"]:
             self.reads.append("/device/0")
-            return 0x45, []
+            return 0x45, self.collection
         return super().read(path, timeout)
+
+
+class _EmptyCollection(_Batch):
+    collection: ClassVar[list] = [{"rt": ["x.com.samsung.devcol"]}]
 
 
 class _Silent(FakeFlatSession):
@@ -76,9 +85,10 @@ async def test_an_entry_without_the_mode_never_goes_per_href(hass: HomeAssistant
     assert sess.reads == ["/device/0"]
 
 
-@pytest.mark.parametrize("session", [FakeFlatSession, _Silent])
+@pytest.mark.parametrize("session", [FakeFlatSession, _Silent, _EmptyCollection])
 async def test_a_per_href_entry_stays_so_without_proof(hass: HomeAssistant, session) -> None:
-    """A 4.04 or no answer keeps it per href, and /device/0 is asked once."""
+    """A 4.04, no answer or an empty Collection keeps it per href, and
+    /device/0 is asked once."""
     coordinator = _coordinator(hass, **_PER_HREF)
     sess = session(links=_AV_LINKS)
     coordinator._session = cast(Any, sess)
@@ -97,7 +107,7 @@ async def test_a_2_05_moves_the_entry_back_to_the_collection(hass: HomeAssistant
     sess = _Batch(links=_AV_LINKS)
     coordinator._session = cast(Any, sess)
 
-    assert coordinator._poll_once() == {}
+    assert coordinator._poll_once() == {"/sec/audio": {"volume": 3}}
     assert coordinator._flat is False
     # Saved only once a poll has got through, as a moved port is.
     assert CONF_READ_MODE in coordinator._entry.data

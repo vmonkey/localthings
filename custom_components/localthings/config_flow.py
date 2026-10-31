@@ -744,10 +744,9 @@ def _read_device(transport, host: str, port: int) -> dict:
     code, body = transport.read(["device", "0"], timeout=PROBE_GET_TIMEOUT_S)
     per_href = code == 0x84
     if per_href:
-        # No /device/0 Collection: read what /oic/res advertises one href at
-        # a time, the way the coordinator then polls it (registry/flat.py).
-        # read_all answers nothing unless at least half of them answered,
-        # so a batch board still booting stays a failed setup.
+        # No /device/0 Collection: read /oic/res's hrefs as the coordinator
+        # will poll them (registry/flat.py). A batch board stored this way
+        # while booting is moved back by the coordinator's /device/0 check.
         resources = read_all(transport, identity.raw.get("/oic/res") or [], logger=_LOGGER)
         usable = bool(resources)
     else:
@@ -1801,8 +1800,8 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 else {}
                             ),
                             **({CONF_MAC: info["mac"]} if info["mac"] is not None else {}),
-                            # Detected again: the device at the new address
-                            # answered the probe with or without /device/0.
+                            # A new address can be a different board, so
+                            # the probe's read mode replaces the stored one.
                             **(
                                 {CONF_READ_MODE: info["read_mode"]} if info.get("read_mode") else {}
                             ),
