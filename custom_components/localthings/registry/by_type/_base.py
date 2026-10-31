@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from ..capability import Capability
 from ..entities import BinarySensorDesc, SensorDesc
@@ -29,7 +29,7 @@ def unpolled(*groups: Iterable[Capability]) -> list[Capability]:
     """Coverage-only capabilities a flat board reads once, at discovery:
     re-reading them every sweep would cost a GET each for nothing."""
     return [
-        replace(cap, poll_tier="never") if cap.poll_tier == "cold" else cap
+        dataclasses.replace(cap, poll_tier="never") if cap.poll_tier == "cold" else cap
         for group in groups
         for cap in group
     ]

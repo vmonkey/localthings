@@ -100,7 +100,6 @@ from .registry.registry import PROBE_HREFS
 from .registry.subdevices import (
     MAIN,
     Subdevice,
-    _iter_oic_res_hrefs,
     canonical_view,
     discover_partitioned,
     enumerate_subdevices,
@@ -626,7 +625,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._resubscribe_due = False
         # No /device/0 Collection (registry/flat.py): polled per href. Set
         # up from the entry (CONF_READ_MODE, decided at setup) and undone
-        # only on proof, a /device/0 answering 2.05 (see _poll_once).
+        # only on proof, a /device/0 answering 2.05 (see _device0_answers).
         self._flat = self._entry.data.get(CONF_READ_MODE) == READ_MODE_PER_HREF
         self._read_mode_checked = False
         self._flat_poll = 0
@@ -1550,16 +1549,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         session = self._session
         if session is None:
             return {}
-        results = {}
-        for href, rep in iter_resources(
-            session,
-            hrefs,
-            timeout=timeout,
-            budget=budget,
-            logger=self._log,
+
+        def cancelled() -> bool:
             # async_close cancels the sub-poll without waiting for this
             # thread, then drops the session; reading on would hit None.
-            stop=lambda: (stop is not None and stop.is_set()) or self._session is not session,
+            return (stop is not None and stop.is_set()) or self._session is not session
+
+        results = {}
+        for href, rep in iter_resources(
+            session, hrefs, timeout=timeout, budget=budget, logger=self._log, stop=cancelled
         ):
             try:
                 if apply:
@@ -1594,7 +1592,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._flat:
             # /oic/res lists everything a flat board has; probing anything
             # else only waits out a timeout.
-            advertised = {link.get("href") for link in _iter_oic_res_hrefs(self._oic_res())}
+            advertised = set(flat_hrefs(self._oic_res()))
             hrefs = [href for href in hrefs if href in advertised]
         return self._poll_hrefs_blocking(
             hrefs, timeout=self._PROBE_TIMEOUT_S, apply=apply, budget=self._PROBE_BUDGET_S
@@ -1639,7 +1637,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # A flat board that went dark mustn't hold the lock 10 s per
             # href: short reads, and a budget of two timeouts on top of the
             # paced reads a live board needs.
-            flat = (
+            limits = (
                 {
                     "timeout": self._FLAT_TIMEOUT_S,
                     "budget": 2 * self._FLAT_TIMEOUT_S + self._FLAT_READ_S * len(hrefs),
@@ -1650,7 +1648,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             async with self._session_lock:
                 stop = threading.Event()
                 job = self.hass.async_add_executor_job(
-                    functools.partial(self._poll_hrefs_blocking, hrefs, stop=stop, **flat)
+                    functools.partial(self._poll_hrefs_blocking, hrefs, stop=stop, **limits)
                 )
                 try:
                     await asyncio.shield(job)
