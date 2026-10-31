@@ -1,7 +1,11 @@
 """Samsung soundbar capabilities (oic.d.networkaudio), captured on an HW-S61B.
 
-Polled per href (registry/flat.py). Unless noted, writes are inferred from
-the resource's oic.if.a interface and representation.
+Polled per href (registry/flat.py). The writes were watched take effect on
+an HW-S61B: bass, treble, audio sync, the EQ preset and bands, the centre,
+side and rear levels, the on/off switches, the audio prompt language and
+Bluetooth pairing. That unit hides the woofer level, bass boost and the
+wide and top levels, so those are untested; they send the same writes as
+their checked neighbours.
 """
 
 from ..capability import Capability
