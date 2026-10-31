@@ -83,7 +83,7 @@ from .registry.capabilities.laundry import cycle_options
 from .registry.discovery import BoundEntity
 from .registry.encode import from_json_safe, json_safe
 from .registry.entities import ClimateDesc
-from .registry.flat import FLAT_TIMEOUT_S, iter_resources, read_all
+from .registry.flat import FLAT_TIMEOUT_S, flat_hrefs, iter_resources, read_all
 from .registry.identity import (
     DeviceIdentity,
     device_display_name,
@@ -511,6 +511,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # live poll -- see async_rehydrate.
         self._rehydrate_resources: dict[str, dict] | None = None
         self._rehydrated_keys: frozenset[tuple[str, str]] | None = None
+        # What a flat board's discovery took from the last snapshot because
+        # the href didn't answer this time -- see _with_remembered_resources.
+        self._discovery_extra: dict[str, dict] = {}
         # Sibling indoor subdevices on this connection (issue #177); set
         # once at first discovery, narrowed to the ones with live state (see
         # subdevices.discover_partitioned). Never includes MAIN itself.
@@ -743,16 +746,18 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Only read while platforms are being forwarded; nothing consults it
         once the entities exist.
         """
-        if self._rehydrate_resources is None:
-            return self.last_resources
-        return self._rehydrate_resources
+        if self._rehydrate_resources is not None:
+            return self._rehydrate_resources
+        if self._discovery_extra:
+            return {**self._discovery_extra, **self.last_resources}
+        return self.last_resources
 
     def discovery_canonical(self, subdevice: Subdevice) -> dict[str, dict]:
         """`discovery_resources` in `subdevice`'s canonical view -- the
         exists_fn counterpart to canonical_resources."""
-        if self._rehydrate_resources is None:
+        if self._rehydrate_resources is None and not self._discovery_extra:
             return self.canonical_resources(subdevice)
-        resources = self._cook_view(self._rehydrate_resources)
+        resources = self._cook_view(self.discovery_resources)
         return canonical_view(subdevice, resources, self.subdevices)
 
     # ------------------------------------------------------------------
@@ -1927,6 +1932,41 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # which is where it was before any of this existed.
             self._log.warning("could not write discovery snapshot: %s", e)
 
+    async def _with_remembered_resources(self, live: dict[str, dict]) -> dict[str, dict]:
+        """A flat board's discovery read, plus what the last snapshot holds
+        for the advertised hrefs that didn't answer this time.
+
+        A flat board is read one href at a time, and an href can miss a read
+        now and then. Discovering from the read alone would drop its
+        entities until the next restart. Only discovery sees the remembered
+        reps: the state cache gets the live read alone, so an entity kept
+        this way stays without a value until its href answers. An href
+        /oic/res no longer advertises is let go.
+        """
+        remembered = self._rehydrate_resources
+        if remembered is None:
+            try:
+                stored = await self._snapshot_store.async_load()
+            except Exception as e:  # corrupt or unreadable store
+                self._log.debug("could not read discovery snapshot: %s", e)
+                stored = None
+            remembered = (
+                from_json_safe(stored["resources"]) if stored and stored.get("resources") else {}
+            )
+        advertised = set(flat_hrefs(self._oic_res()))
+        self._discovery_extra = {
+            href: rep
+            for href, rep in remembered.items()
+            if href not in live and href in advertised and isinstance(rep, dict)
+        }
+        if self._discovery_extra:
+            self._log.debug(
+                "discovery keeps %d resources from the last snapshot that didn't answer: %s",
+                len(self._discovery_extra),
+                sorted(self._discovery_extra),
+            )
+        return {**self._discovery_extra, **live}
+
     async def async_rehydrate(self) -> bool:
         """Register the last known entity set without reaching the device.
 
@@ -2596,11 +2636,12 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 *self.subdevices,
                 *(s for s in self.disabled_subdevices if s not in self.subdevices),
             ]
-            self._run_discovery(resources)
+            found = await self._with_remembered_resources(resources) if self._flat else resources
+            self._run_discovery(found)
             # Banked before the reconcile below, so a reload it schedules
             # comes up against this discovery rather than the one that is
             # being replaced.
-            await self._async_save_snapshot(resources, candidates)
+            await self._async_save_snapshot(found, candidates)
             self._reconcile_rehydrated()
             resources = self._live_subdevice_resources(resources)
         sweep_mismatch = False

@@ -427,3 +427,70 @@ async def test_flat_subpolls_rotate_so_no_href_is_starved(hass: HomeAssistant, m
     assert set(first) == {"/a", "/b", "/c", "/d"}
     # Four live reads fit, with room for two timeouts.
     assert set(budgets) == {2 * coordinator._FLAT_TIMEOUT_S + 4 * coordinator._FLAT_READ_S}
+
+
+async def test_flat_discovery_keeps_what_did_not_answer_this_time(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """An href that missed this read keeps its entities from the last
+    snapshot, without its old value reaching the state cache; one /oic/res
+    no longer advertises is let go."""
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._flat = True
+    coordinator._identity = _identity(_AV_LINKS)
+    await coordinator._snapshot_store.async_save(
+        {
+            "resources": {
+                "/sec/switch/binary": {"value": False},
+                "/sec/audio": {"volume": 1},
+                "/sec/gone": {"value": 1},
+            },
+            "subdevice_candidates": [],
+            "identity": None,
+        }
+    )
+    live = {"/sec/audio": {"volume": 9}}
+
+    found = await coordinator._with_remembered_resources(live)
+
+    assert found == {"/sec/switch/binary": {"value": False}, "/sec/audio": {"volume": 9}}
+    coordinator._observe.apply("/sec/audio", {"volume": 9}, source="poll")
+    assert coordinator.discovery_resources == found
+    assert "/sec/switch/binary" not in coordinator.last_resources
+
+
+async def test_flat_discovery_without_a_snapshot_is_the_live_read(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._flat = True
+    coordinator._identity = _identity(_AV_LINKS)
+    assert await coordinator._with_remembered_resources(_RESOURCES) == _RESOURCES
+    assert coordinator.discovery_resources == coordinator.last_resources
+
+
+async def test_a_first_flat_cycle_banks_what_did_not_answer(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """End to end: the new snapshot carries the remembered rep, the state
+    cache only what answered."""
+    from unittest.mock import patch
+
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._flat = True
+    coordinator._identity = _identity(_AV_LINKS)
+    switch = {"rt": ["oic.r.switch.binary"], "value": False}
+    await coordinator._snapshot_store.async_save(
+        {"resources": {"/sec/switch/binary": switch}, "subdevice_candidates": [], "identity": None}
+    )
+
+    with (
+        patch.object(coordinator, "_poll_once", return_value={"/sec/audio": {"volume": 9}}),
+        patch.object(coordinator, "_attempt_observe_mode"),
+    ):
+        await coordinator._async_update_data()
+
+    assert "/sec/switch/binary" not in coordinator.last_resources
+    stored = await coordinator._snapshot_store.async_load()
+    assert stored is not None
+    assert stored["resources"]["/sec/switch/binary"] == switch
