@@ -24,9 +24,11 @@ from custom_components.localthings.const import (
     CONF_PSK_IDENTITY,
     CONF_PSK_KEY,
     CONF_PSK_PROFILE,
+    CONF_READ_MODE,
     CONF_SERIAL,
     DOMAIN,
     PSK_PROFILE_OWNER,
+    READ_MODE_PER_HREF,
     TRANSPORT_DTLS,
 )
 from custom_components.localthings.coordinator import LocalThingsCoordinator
@@ -54,6 +56,7 @@ ENTRY_DATA = {
     CONF_SERIAL: MOCK_HOST,
     CONF_MODEL: "HW-S61B",
     CONF_MANUFACTURER: "Samsung Electronics",
+    CONF_READ_MODE: READ_MODE_PER_HREF,
 }
 
 
@@ -170,7 +173,7 @@ async def test_psk_entry_polls_flat(hass: HomeAssistant) -> None:
     assert coordinator._flat is True
     assert coordinator._write_settle_s == 6.0
     assert coordinator.device_type_name == "soundbar"
-    # One batch read across all setup cycles, then per href.
+    # /device/0 asked once, on the first poll (it answers 4.04), then per href.
     assert session.reads.count("/device/0") == 1
     # No /oic/sec/* GET ever left the integration, enumeration included.
     assert not any(href.startswith("/oic/sec/") for href in session.reads)
@@ -233,3 +236,12 @@ async def test_channel_level_write_keeps_the_other_channels(
     assert float(_state_of(rear)) == 3
     assert float(_state_of(center)) == -6
     assert _state_of(flag) == "on"
+
+
+async def test_diagnostics_report_the_stored_read_mode(hass: HomeAssistant) -> None:
+    from custom_components.localthings.diagnostics import async_get_config_entry_diagnostics
+
+    entry = _mock_entry(hass)
+    await _setup_soundbar(hass, entry)
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag["read_mode"] == READ_MODE_PER_HREF

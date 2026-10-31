@@ -17,10 +17,6 @@ class DeviceRegistry:
     name: str
     capabilities: dict[str, list[Capability]]
     pattern_capabilities: list[Capability] = field(default_factory=list)
-    # No /device/0 Collection: read one href at a time (registry/flat.py),
-    # and found by a ClientHello probe when the port moves, as these boards
-    # advertise nothing in plaintext.
-    flat: bool = False
     # Poll tiers that may carry an OBSERVE subscription; () when
     # subscriptions cost other clients their session (the AV boards).
     subscribe_tiers: tuple[str, ...] = ("hot", "warm")

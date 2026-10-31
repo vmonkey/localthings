@@ -48,12 +48,14 @@ from .const import (
     CONF_MODEL,
     CONF_OCF_DEVICE_ID,
     CONF_PORT,
+    CONF_READ_MODE,
     CONF_SERIAL,
     CONF_TRANSPORT,
     DEFAULT_CLOUD_COURSES_ENABLED,
     DEFAULT_LEARN_MODES,
     DEVICE_SUPPORT_ISSUE_URL,
     DOMAIN,
+    READ_MODE_PER_HREF,
     SUMMARY_INTERVAL_S,
     TRANSPORT_LEGACY_HTTP,
 )
@@ -69,7 +71,7 @@ from .observe import GRACE_PERIOD_S, MODE_OBSERVE, MODE_POLL, ObserveManager
 from .registry import CAPABILITIES
 from .registry.adapter import _key, flatten
 from .registry.batch import parse_device0_batch
-from .registry.by_type import is_flat_board, registry_for
+from .registry.by_type import registry_for
 from .registry.by_type import resolve as resolve_registry
 from .registry.capabilities import cook
 from .registry.capabilities.common import (
@@ -467,6 +469,8 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     _FLAT_TIMEOUT_S: float = FLAT_TIMEOUT_S
     _FLAT_BUDGET_S: float = 20.0
     _FLAT_FULL_EVERY_N_POLLS: int = 4
+    # The once-per-start /device/0 GET of a per-href entry (_device0_answers).
+    _READ_MODE_CHECK_TIMEOUT_S: float = 10.0
     # One paced read on a live board: the transport's 5 requests/s plus the
     # round trip.
     _FLAT_READ_S: float = 0.3
@@ -620,9 +624,11 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # observe; consumed once to trigger an immediate resubscribe
         # instead of waiting out _RECOVERY_RETRY_S.
         self._resubscribe_due = False
-        # No /device/0 Collection (registry/flat.py): set on its first 4.04,
-        # then polls go per href. Not persisted; redetecting costs one read.
-        self._flat = False
+        # No /device/0 Collection (registry/flat.py): polled per href. Set
+        # up from the entry (CONF_READ_MODE, decided at setup) and undone
+        # only on proof, a /device/0 answering 2.05 (see _poll_once).
+        self._flat = self._entry.data.get(CONF_READ_MODE) == READ_MODE_PER_HREF
+        self._read_mode_checked = False
         self._flat_poll = 0
         self._subpoll_turn = 0
         # Set per family at discovery (registry/by_type).
@@ -1160,12 +1166,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = time.monotonic()
         if now < self._next_rediscovery_ts:
             return None
-        # Before the first poll, the family stored in the entry decides.
-        family = self.device_type_name or self._entry.data.get(CONF_DEVICE_TYPE)
-        flat = self._flat or registry_for(family).flat
         self._rediscovery_backoff_s = min(
             max(self._rediscovery_backoff_s * 2, self._REDISCOVERY_BACKOFF_MIN_S),
-            self._REDISCOVERY_BACKOFF_FLAT_MAX_S if flat else self._REDISCOVERY_BACKOFF_MAX_S,
+            self._REDISCOVERY_BACKOFF_FLAT_MAX_S if self._flat else self._REDISCOVERY_BACKOFF_MAX_S,
         )
         self._next_rediscovery_ts = now + self._rediscovery_backoff_s
         try:
@@ -1173,12 +1176,24 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._entry.data[CONF_HOST],
                 current,
                 self._entry.data.get(CONF_OCF_DEVICE_ID),
-                # Holds the session lock for seconds, so only where needed.
-                probe_scan=flat,
+                # A per-href board advertises nothing in plaintext, so only a
+                # ClientHello probe finds its moved port. It holds the session
+                # lock for seconds, so only where needed.
+                probe_scan=self._flat,
             )
         except Exception as e:
             self._log.debug("secure port lookup failed: %s", e)
             return None
+
+    @callback
+    def _persist_read_mode(self) -> None:
+        """Drop CONF_READ_MODE once _device0_answers proved it wrong."""
+        if self._flat or CONF_READ_MODE not in self._entry.data:
+            return
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            data={k: v for k, v in self._entry.data.items() if k != CONF_READ_MODE},
+        )
 
     @callback
     def _persist_moved_port(self) -> None:
@@ -1353,6 +1368,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._handshake_failed = False
         sess = self._session
         assert sess is not None
+        if self._flat and not self._read_mode_checked:
+            self._read_mode_checked = True
+            self._flat = not self._device0_answers(sess)
         if self._flat:
             return self._poll_flat_blocking(sess)
         try:
@@ -1376,13 +1394,6 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             self._close_session()
             raise RuntimeError(f"poll GET failed: {e}") from e
-        # Flat only before first discovery, and only on a flat board: a batch
-        # board's 4.04 while it boots, or a legacy bridge's 404, is just a
-        # failed poll.
-        if code == 0x84 and not self._discovered and self._is_flat_board():
-            self._flat = True
-            self._log.info("/device/0 answered 4.04; polling resources individually")
-            return self._poll_flat_blocking(sess)
         if code != 0x45 or body is None:
             self._close_session()
             reason = f" ({body})" if isinstance(body, str) else ""
@@ -1452,10 +1463,24 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         links = self._identity.raw.get("/oic/res") if self._identity else None
         return links if isinstance(links, list) else []
 
-    def _is_flat_board(self) -> bool:
-        if self._entry.data.get(CONF_TRANSPORT) == TRANSPORT_LEGACY_HTTP:
+    def _device0_answers(self, sess: Transport) -> bool:
+        """True when a per-href entry's /device/0 answers 2.05 after all.
+        Blocking.
+
+        Asked once per coordinator start (_read_mode_checked), on the first
+        poll that has a session. Only that answer moves the entry back to
+        the Collection (_persist_read_mode): a 4.04, no answer or an error
+        keeps it per href, so a board that is off at startup stays so.
+        """
+        try:
+            code, body = sess.read(_SEED_PATH, timeout=self._READ_MODE_CHECK_TIMEOUT_S)
+        except Exception as e:
+            self._log.debug("/device/0 check: %s", e)
             return False
-        return is_flat_board(self._identity.device_types if self._identity else ())
+        if code != 0x45 or not isinstance(body, list):
+            return False
+        self._log.info("/device/0 answered 2.05; polling the Collection again")
+        return True
 
     def _poll_flat_blocking(self, sess) -> dict[str, dict]:
         """Poll a flat board (self._flat) one href at a time. Blocking.
@@ -2434,6 +2459,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Clear the bookkeeping a poll getting through invalidates."""
         self.last_response = dt_util.utcnow()
         self._persist_moved_port()
+        self._persist_read_mode()
         self._consecutive_poll_timeouts = 0
         if self._failed_cycles:
             self._log.info("device answered again after %d failed cycles", self._failed_cycles)

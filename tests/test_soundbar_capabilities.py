@@ -258,8 +258,7 @@ def test_wifi_signal_is_a_percent_with_the_index_kept():
 
 
 def test_attitude_toward_the_board_is_deliberate():
-    """Flat, no OBSERVE and a short write-settle window (see by_type/soundbar.py)."""
+    """No OBSERVE and a short write-settle window (see by_type/soundbar.py)."""
     reg = registry_for("soundbar")
-    assert reg.flat is True
     assert reg.subscribe_tiers == ()
     assert reg.write_settle_s == 6.0

@@ -54,7 +54,6 @@ REGISTRY = DeviceRegistry(
         # Alexa sign-in/profile sub-tree: account linkage resources.
         Capability(href_prefix="/sec/alexa/", poll_tier="never"),
     ],
-    flat=True,
     # No OBSERVE: subscriptions drop the SmartThings app's session to the
     # device until it is power-cycled.
     subscribe_tiers=(),

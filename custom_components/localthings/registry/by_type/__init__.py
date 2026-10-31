@@ -34,7 +34,6 @@ __all__ = [
     "for_device_by_model",
     "for_device_by_oic_type",
     "for_device_by_resources",
-    "is_flat_board",
     "registry_for",
     "resolve",
 ]
@@ -287,17 +286,9 @@ _DEFAULT = DeviceRegistry(name="", capabilities={})
 
 
 def registry_for(name: str | None) -> DeviceRegistry:
-    """A family's registry by name, for its settings (flat, subscribe_tiers,
+    """A family's registry by name, for its settings (subscribe_tiers,
     write_settle_s); an unrecognized device gets the defaults."""
     return _REGISTRY_BY_KEY.get(name or "", _DEFAULT)
-
-
-def is_flat_board(device_types: Sequence[str]) -> bool:
-    """True for a board /oic/d names as one without /device/0: a 4.04 there
-    then means "read each href", not a device still booting. Not inferred
-    from /oic/res, where many batch appliances list no /device/0 either."""
-    registry = for_device_by_oic_type(device_types)
-    return registry is not None and registry.flat
 
 
 def for_device_by_model(model_num: str, description: str) -> DeviceRegistry | None:

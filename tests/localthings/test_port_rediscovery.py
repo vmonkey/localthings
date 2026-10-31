@@ -29,10 +29,12 @@ from custom_components.localthings.const import (
     CONF_PSK_IDENTITY,
     CONF_PSK_KEY,
     CONF_PSK_PROFILE,
+    CONF_READ_MODE,
     CONF_TRANSPORT,
     DOMAIN,
     MULTICAST_SECURE_PORT,
     PSK_PROFILE_OWNER,
+    READ_MODE_PER_HREF,
     TRANSPORT_LEGACY_HTTP,
 )
 from custom_components.localthings.coordinator import LocalThingsCoordinator
@@ -177,7 +179,7 @@ async def test_a_flat_board_off_for_hours_is_looked_up_every_minute(
     next lookup must not sit 30 minutes out: it would stay unavailable that
     long after being switched on."""
     appliance.live_port = None
-    coordinator = _coordinator(hass, **{CONF_DEVICE_TYPE: "soundbar"})
+    coordinator = _coordinator(hass, **{CONF_READ_MODE: READ_MODE_PER_HREF})
     clock = [0.0]
     monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: clock[0])
 
@@ -339,31 +341,26 @@ async def test_an_alert_from_the_stored_port_does_not_look_for_a_moved_one(
     assert device.lookups == 0
 
 
-def test_startup_rediscovery_uses_the_persisted_family(hass: HomeAssistant) -> None:
-    """Before the first poll, the entry's stored family decides on the probe."""
+def test_startup_rediscovery_uses_the_stored_read_mode(hass: HomeAssistant) -> None:
+    """Before the first poll, the entry's read mode decides on the probe: a
+    per-href board advertises nothing in plaintext."""
     calls = []
 
     def _recorder(host, current, device_id=None, *, probe_scan=False):
         calls.append(probe_scan)
 
     with patch.object(probing, "moved_secure_port", _recorder):
-        coordinator = _coordinator(hass, **{CONF_DEVICE_TYPE: "washer"})
-        coordinator._rediscover_port(40294)
-
-        soundbar = _coordinator(hass, **{CONF_DEVICE_TYPE: "soundbar"})
-        soundbar._rediscover_port(40294)
-
-        unknown = _coordinator(hass)
-        unknown._rediscover_port(40294)
+        _coordinator(hass, **{CONF_DEVICE_TYPE: "washer"})._rediscover_port(40294)
+        _coordinator(hass, **{CONF_READ_MODE: READ_MODE_PER_HREF})._rediscover_port(40294)
+        _coordinator(hass)._rediscover_port(40294)
 
     assert calls == [False, True, False]
 
 
-def test_live_view_wins_over_the_persisted_family(hass: HomeAssistant) -> None:
-    """The family found by discovery outranks the stored one."""
+def test_a_board_proven_to_have_device0_is_not_probe_scanned(hass: HomeAssistant) -> None:
     calls = []
-    coordinator = _coordinator(hass, **{CONF_DEVICE_TYPE: "soundbar"})
-    coordinator.device_type_name = "washer"
+    coordinator = _coordinator(hass, **{CONF_READ_MODE: READ_MODE_PER_HREF})
+    coordinator._flat = False  # its /device/0 answered 2.05 (_device0_answers)
 
     with patch.object(
         probing,

@@ -1,7 +1,7 @@
 """Polling a device with no /device/0 Collection (registry/flat.py).
 
-Covers the 4.04 detection, the per-href reads, and the setup probe's
-matching fallback.
+Covers the per-href reads, and the setup probe's fallback to them;
+test_flat_detection.py covers the read mode stored in the entry.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import pytest
 from homeassistant.core import HomeAssistant
 
 from custom_components.localthings.config_flow import UnexpectedResponse, _read_device
+from custom_components.localthings.const import READ_MODE_PER_HREF
 from custom_components.localthings.coordinator import LocalThingsCoordinator
 from custom_components.localthings.observe import MODE_POLL
 from custom_components.localthings.registry.flat import flat_hrefs, iter_resources
@@ -138,8 +139,9 @@ def test_iter_resources_budget_spent_returns_what_it_has() -> None:
     assert sess.reads == []
 
 
-def test_poll_once_switches_to_flat_on_404(hass: HomeAssistant, mock_entry) -> None:
+def test_a_per_href_board_reads_what_oic_res_advertises(hass: HomeAssistant, mock_entry) -> None:
     coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._flat = True  # as CONF_READ_MODE sets it
     sess = FakeFlatSession()
     coordinator._session = cast(Any, sess)
     # As the real AV boards answer: /oic/res advertises no /device/0.
@@ -149,8 +151,8 @@ def test_poll_once_switches_to_flat_on_404(hass: HomeAssistant, mock_entry) -> N
 
     assert coordinator._flat is True
     assert resources == _RESOURCES
-    # The batch href was tried exactly once; every later poll goes straight
-    # to the per-href reads.
+    # /device/0 was asked exactly once (test_flat_detection.py); every later
+    # poll goes straight to the per-href reads.
     coordinator._poll_once()
     assert sess.reads.count("/device/0") == 1
     assert "/oic/sec/doxm" not in sess.reads
@@ -177,7 +179,7 @@ def test_flat_poll_after_discovery_cold_sweep_every_n_cycles(
     from types import SimpleNamespace
 
     coordinator = LocalThingsCoordinator(hass, mock_entry)
-    coordinator._flat = True
+    coordinator._flat = coordinator._read_mode_checked = True
     coordinator._discovered = True
     coordinator._hot_hrefs = ["/sec/audio"]
     coordinator._warm_hrefs = ["/sec/switch/binary"]
@@ -224,6 +226,7 @@ def test_a_board_dozing_in_standby_is_not_discovered(hass: HomeAssistant, mock_e
     """A handshake that completes, then most reads time out: discovering from
     that would register a few entities and drop the rest."""
     coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._flat = True
     coordinator._identity = _identity(_AV_LINKS)
     # One of the three advertised resources answers.
     coordinator._session = cast(Any, FakeFlatSession(resources={"/sec/audio": {"volume": 3}}))
@@ -270,15 +273,32 @@ def test_probe_reads_a_flat_device() -> None:
     # /oic/d's rt is the only route on this family.
     assert info["device_type_recognized"] is True
     assert info["device_type_name"] == "soundbar"
+    assert info["read_mode"] == READ_MODE_PER_HREF
 
 
-def test_probe_of_a_batch_board_answering_4_04_is_unusable() -> None:
-    """A batch board answering 4.04 (still booting) is not read href by
-    href; setup reports it instead."""
-    sess = _BatchBoard()
-    with pytest.raises(UnexpectedResponse):
+def test_probe_of_a_batch_board_still_booting_is_unusable() -> None:
+    """A batch board answering 4.04 while it boots answers few of its
+    resources either; setup reports it instead of storing it per href."""
+    sess = _BatchBoard(resources={"/sec/audio": {"volume": 3}})
+    with pytest.raises(UnexpectedResponse, match=r"4\.04"):
         _read_device(sess, "10.0.0.99", 49154)
-    assert sess.reads[-1] == "/device/0"
+
+
+def test_probe_needs_no_family_flag_to_read_per_href() -> None:
+    """Any board without /device/0 that answers its resources is set up per
+    href; no registry has to say so first."""
+    info = _read_device(_BatchBoard(links=_AV_LINKS), "10.0.0.99", 49154)
+    assert info["read_mode"] == READ_MODE_PER_HREF
+
+
+def test_probe_of_a_collection_board_keeps_the_collection() -> None:
+    class _Collection(FakeFlatSession):
+        def read(self, path, timeout=None):
+            if list(path) == ["device", "0"]:
+                return 0x45, []
+            return super().read(path, timeout)
+
+    assert _read_device(_Collection(), "10.0.0.99", 49154)["read_mode"] is None
 
 
 def test_probe_flat_device_answering_nothing_is_unusable() -> None:
@@ -384,7 +404,7 @@ def test_a_board_back_from_off_is_read_in_full_at_once(hass: HomeAssistant, mock
     from types import SimpleNamespace
 
     coordinator = LocalThingsCoordinator(hass, mock_entry)
-    coordinator._flat = coordinator._discovered = True
+    coordinator._flat = coordinator._discovered = coordinator._read_mode_checked = True
     coordinator.bound = cast(Any, [SimpleNamespace(href="/sec/audio")])
     sess = FakeFlatSession()
     coordinator._session = cast(Any, sess)
