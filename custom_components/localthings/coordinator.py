@@ -68,6 +68,7 @@ from .credentials import (
 from .devices import set_via_device
 from .learned import LEARNABLE, LearnedModes, persist
 from .observe import GRACE_PERIOD_S, MODE_OBSERVE, MODE_POLL, ObserveManager
+from .playback import PlaybackController
 from .registry import CAPABILITIES
 from .registry.adapter import _key, flatten
 from .registry.batch import parse_device0_batch
@@ -84,7 +85,7 @@ from .registry.capabilities.common import (
 from .registry.capabilities.laundry import cycle_options
 from .registry.discovery import BoundEntity
 from .registry.encode import from_json_safe, json_safe
-from .registry.entities import ClimateDesc
+from .registry.entities import ClimateDesc, MediaPlayerDesc
 from .registry.flat import FLAT_TIMEOUT_S, flat_hrefs, iter_resources, read_all
 from .registry.identity import (
     DeviceIdentity,
@@ -608,6 +609,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._next_rediscovery_ts = 0.0
         self._rediscovery_backoff_s = 0.0
         self._moved_port: int | None = None
+        self.playback = PlaybackController()
         # Consecutive cycles that ended with no data from the device, so an
         # outage is reported once rather than once per poll (issue #269).
         self._failed_cycles = 0
@@ -2725,9 +2727,18 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Command dispatch (called by entity platforms in Task 5)
     # ------------------------------------------------------------------
 
-    async def async_send_command(self, bound_entity: BoundEntity, payload: Any) -> None:
+    async def async_send_command(
+        self,
+        bound_entity: BoundEntity,
+        payload: Any,
+        *,
+        optimistic_body: dict | None = None,
+    ) -> None:
         """Write a value to the device. Retries once on a dead session
         (issue #294); raises HomeAssistantError if that retry fails too.
+
+        optimistic_body overrides the cache update when the command payload
+        differs from readable state; it is never sent to the device.
 
         A description-level validate_fn (SwitchDesc and SelectDesc) rejects
         a write with a user-facing message ahead of write_fn's silent
@@ -2837,9 +2848,17 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         write_only = getattr(desc, "write_only", False)
         previous_settle = self._observe.settle_deadline(write_href)
         armed_settle = 0.0
+        # A relative seek is applied only once it landed: a failed one must
+        # not become the next seek's baseline.
+        seek = (
+            isinstance(desc, MediaPlayerDesc)
+            and isinstance(payload, tuple)
+            and payload[0] == "seek"
+        )
         if not write_only:
-            optimistic_fn = getattr(desc, "optimistic_fn", None)
-            optimistic_body = optimistic_fn(body) if optimistic_fn else body
+            if optimistic_body is None:
+                optimistic_fn = getattr(desc, "optimistic_fn", None)
+                optimistic_body = optimistic_fn(body) if optimistic_fn else body
             # From optimistic_body, or the merge drops what optimistic_fn added.
             new_options = optimistic_body.get("x.com.samsung.da.options")
             if isinstance(new_options, list):
@@ -2858,10 +2877,11 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         **optimistic_body,
                         rows: merge_items_field(cached_rows, new_rows, key),
                     }
-            self._observe.apply(write_href, optimistic_body, source="optimistic")
-            armed_settle = self._observe.mark_write_pending(
-                write_href, settle_s=self._write_settle_s
-            )
+            if not seek:
+                self._observe.apply(write_href, optimistic_body, source="optimistic")
+                armed_settle = self._observe.mark_write_pending(
+                    write_href, settle_s=self._write_settle_s
+                )
 
         def _rearm() -> None:
             nonlocal armed_settle
@@ -2870,7 +2890,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # for the confirming poll below and reviving the
             # revert-then-reapply symptom settle_s exists to prevent (issue
             # #9). Re-arm it fresh now that the write actually landed.
-            if not write_only:
+            if not write_only and not seek:
                 armed_settle = self._observe.mark_write_pending(
                     write_href, settle_s=self._write_settle_s
                 )
@@ -2896,11 +2916,14 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (HomeAssistantError, asyncio.CancelledError) as err:
             # Not known to have landed: let the next poll replace the
             # optimistic value instead of holding it for the settle window.
-            if not write_only:
+            if not write_only and not seek:
                 self._observe.restore_write_pending(write_href, previous_settle, armed_settle)
             if getattr(err, "translation_key", None) in _APPLIANCE_ANSWERED:
                 await self.async_request_refresh()
             raise
+        if seek and not write_only and optimistic_body is not None:
+            self._observe.apply(write_href, optimistic_body, source="optimistic")
+            self._observe.mark_write_pending(write_href, settle_s=self._write_settle_s)
         await self.async_request_refresh()
 
     async def _took_effect(self, path_segs: list[str], body: dict | list) -> bool:
