@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import timedelta
+from functools import partial
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,6 +20,17 @@ from custom_components.localthings.registry.discovery import BoundEntity
 from tests.localthings.test_soundbar import ENTRY_DATA
 
 
+async def _prepared_put(write, path, body, href, **kwargs):
+    prepare = kwargs.pop("prepare_body", None)
+    if prepare is not None:
+        prepared = prepare()
+        if prepared is None:
+            return False
+        body = prepared
+    await write(path, body, href, **kwargs)
+    return True
+
+
 @pytest.mark.parametrize("family", ["soundbar"])
 @pytest.mark.parametrize("error", [HomeAssistantError("write failed"), asyncio.CancelledError()])
 async def test_failed_seek_preserves_position_evidence(
@@ -27,7 +39,7 @@ async def test_failed_seek_preserves_position_evidence(
     entry = MockConfigEntry(domain="localthings", data=ENTRY_DATA, version=4)
     coordinator = LocalThingsCoordinator(hass, entry)
     write = AsyncMock(side_effect=[error, None])
-    monkeypatch.setattr(coordinator, "_async_put", write)
+    monkeypatch.setattr(coordinator, "_async_put", partial(_prepared_put, write))
     monkeypatch.setattr(coordinator, "async_request_refresh", AsyncMock())
     capability = soundbar.MEDIA_PLAYER
     profile = _PROFILES[family]
@@ -63,7 +75,7 @@ async def test_consecutive_seeks_preserve_absolute_targets(
     entry = MockConfigEntry(domain="localthings", data=ENTRY_DATA, version=4)
     coordinator = LocalThingsCoordinator(hass, entry)
     write = AsyncMock()
-    monkeypatch.setattr(coordinator, "_async_put", write)
+    monkeypatch.setattr(coordinator, "_async_put", partial(_prepared_put, write))
     monkeypatch.setattr(coordinator, "async_request_refresh", AsyncMock())
     capability = soundbar.MEDIA_PLAYER
     profile = _PROFILES[family]
@@ -104,7 +116,7 @@ async def test_seek_after_resume_ignores_the_paused_time(
     entry = MockConfigEntry(domain="localthings", data=ENTRY_DATA, version=4)
     coordinator = LocalThingsCoordinator(hass, entry)
     write = AsyncMock()
-    monkeypatch.setattr(coordinator, "_async_put", write)
+    monkeypatch.setattr(coordinator, "_async_put", partial(_prepared_put, write))
     monkeypatch.setattr(coordinator, "async_request_refresh", AsyncMock())
     capability = soundbar.MEDIA_PLAYER
     profile = _PROFILES[family]
@@ -150,7 +162,7 @@ async def test_overlapping_seeks_wait_for_the_previous_position(
         await finish.wait()
 
     write = AsyncMock(side_effect=put)
-    monkeypatch.setattr(coordinator, "_async_put", write)
+    monkeypatch.setattr(coordinator, "_async_put", partial(_prepared_put, write))
     monkeypatch.setattr(coordinator, "async_request_refresh", AsyncMock())
     capability = soundbar.MEDIA_PLAYER
     profile = _PROFILES[family]

@@ -1,10 +1,13 @@
 """Lost replies and optimistic modes must not invent playback evidence."""
 
-from unittest.mock import AsyncMock, Mock
+import asyncio
+from datetime import timedelta
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.localthings.coordinator import LocalThingsCoordinator
@@ -143,3 +146,79 @@ async def test_playback_commands_preserve_a_usable_position(playback, monkeypatc
     await getattr(player, command)()
     assert player.supported_features & MediaPlayerEntityFeature.SEEK
     assert player.media_position == 120
+
+
+@pytest.mark.parametrize("mode", ["play", "pause", "stop"])
+async def test_seek_rechecks_position_after_waiting_for_a_poll(playback, monkeypatch, mode):
+    player, coordinator, profile = playback
+    initial_mode = "play" if mode == "stop" else mode
+    coordinator._observe.apply(profile.playback_href, {"modes": [initial_mode]}, source="poll")
+    now = dt_util.utcnow()
+    player._position_updated_at = now
+    device_position = 120
+    session = FakeSoundbarSession()
+    writes = []
+
+    def write(path, body, timeout=None):
+        nonlocal device_position
+        writes.append(body.copy())
+        device_position += body["position"]
+        return 0x44, None
+
+    monkeypatch.setattr(session, "write", write)
+    coordinator._session = session
+    entered = asyncio.Event()
+    original = coordinator._async_put
+
+    async def put(*args, **kwargs):
+        entered.set()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "_async_put", put)
+    await coordinator._session_lock.acquire()
+    with patch(
+        "custom_components.localthings.media_player.dt_util.utcnow", return_value=now
+    ) as clock:
+        task = asyncio.create_task(player.async_media_seek(180))
+        try:
+            await entered.wait()
+            if mode == "play":
+                device_position += 20
+            elif mode == "stop":
+                coordinator._observe.apply(
+                    profile.playback_href, {"modes": ["stop"]}, source="poll"
+                )
+            clock.return_value = now + timedelta(seconds=20)
+        finally:
+            coordinator._session_lock.release()
+        await task
+    if mode == "stop":
+        assert writes == []
+        assert player._position_updated_at == now
+        assert coordinator.resource(profile.playback_href)["position"] == 120_000
+    else:
+        assert device_position == 180
+        assert writes == [{"modes": ["seek"], "position": 40 if mode == "play" else 60}]
+        assert player.media_position == 180
+        assert player.media_position_updated_at == now + timedelta(seconds=20)
+
+
+async def test_seek_is_prepared_after_reconnecting(playback, monkeypatch):
+    player, coordinator, profile = playback
+    coordinator._observe.apply(profile.playback_href, {"modes": ["play"]}, source="poll")
+    now = dt_util.utcnow()
+    player._position_updated_at = now
+    session = FakeSoundbarSession()
+    write = Mock(return_value=(0x44, None))
+    monkeypatch.setattr(session, "write", write)
+    with patch(
+        "custom_components.localthings.media_player.dt_util.utcnow", return_value=now
+    ) as clock:
+
+        def reconnect():
+            clock.return_value = now + timedelta(seconds=10)
+            coordinator._session = session
+
+        monkeypatch.setattr(coordinator, "_connect_session", reconnect)
+        await player.async_media_seek(180)
+    assert write.call_args.args[1] == {"modes": ["seek"], "position": 50}

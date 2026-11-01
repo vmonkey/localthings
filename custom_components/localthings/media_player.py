@@ -533,30 +533,38 @@ class LocalThingsMediaPlayer(LocalThingsEntity, MediaPlayerEntity):
             await self._async_seek(position)
 
     async def _async_seek(self, position: float) -> None:
-        # The device seeks by a delta from where playback is now; HA gives a target.
-        position_ms = self._playback_position_ms()
-        if position_ms is None:
+        if self._playback_position_ms() is None:
             return
-        now = dt_util.utcnow()
-        current = position_ms / 1000
-        # The feed's own mode, not the entity state: during AirPlay the bar
-        # reads as playing while the feed says stop and its position is frozen.
-        playing = self._feed_playing()
-        if playing and self._position_updated_at is not None:
-            current += (now - self._position_updated_at).total_seconds()
         target_ms = round(position * 1000)
-        previous = self._position_updated_at, self._last_position_evidence
-        # Consecutive seeks cannot wait for the queued cache notification.
-        self._position_updated_at = now
-        self._last_position_evidence = ("playback", target_ms, playing)
+        previous = None
+
+        def prepare_payload():
+            nonlocal previous
+            # Polls and reconnects can hold the session while playback advances.
+            # Compute the relative seek only once the transport is ready.
+            position_ms = self._playback_position_ms()
+            if position_ms is None:
+                return None
+            now = dt_util.utcnow()
+            current = position_ms / 1000
+            playing = self._feed_playing()
+            if playing and self._position_updated_at is not None:
+                current += (now - self._position_updated_at).total_seconds()
+            previous = self._position_updated_at, self._last_position_evidence
+            self._position_updated_at = now
+            self._last_position_evidence = ("playback", target_ms, playing)
+            return "seek", round(position - current)
+
         try:
             await self.coordinator.async_send_command(
                 self._bound,
-                ("seek", round(position - current)),
+                ("seek", 0),
                 optimistic_body={"position": target_ms},
+                prepare_payload=prepare_payload,
             )
         except BaseException:
-            self._position_updated_at, self._last_position_evidence = previous
+            if previous is not None:
+                self._position_updated_at, self._last_position_evidence = previous
             raise
 
     async def async_set_shuffle(self, shuffle: bool) -> None:

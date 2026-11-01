@@ -2733,12 +2733,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload: Any,
         *,
         optimistic_body: dict | None = None,
+        prepare_payload: Callable[[], Any | None] | None = None,
     ) -> None:
         """Write a value to the device. Retries once on a dead session
         (issue #294); raises HomeAssistantError if that retry fails too.
 
         optimistic_body overrides the cache update when the command payload
         differs from readable state; it is never sent to the device.
+        prepare_payload recalculates a command for the same href once the
+        session is ready, or returns None if it is no longer applicable.
 
         A description-level validate_fn (SwitchDesc and SelectDesc) rejects
         a write with a user-facing message ahead of write_fn's silent
@@ -2895,6 +2898,17 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     write_href, settle_s=self._write_settle_s
                 )
 
+        def _prepare_body() -> dict | None:
+            if prepare_payload is None:
+                return body
+            prepared = prepare_payload()
+            if prepared is None:
+                return None
+            current_rep = self.entity_rep(href or "")
+            current_resources = self.canonical_resources(bound_entity.subdevice)
+            result = write_fn(prepared, current_rep, href, current_resources)
+            return result[1] if result is not None else None
+
         try:
             retry = not (
                 isinstance(desc, MediaPlayerDesc)
@@ -2904,7 +2918,19 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     or payload == ("playback", "playpause")
                 )
             )
-            await self._async_put(path_segs, body, write_href, on_retry=_rearm, retry=retry)
+            if prepare_payload is not None:
+                sent = await self._async_put(
+                    path_segs,
+                    body,
+                    write_href,
+                    on_retry=_rearm,
+                    retry=retry,
+                    prepare_body=_prepare_body,
+                )
+                if sent is False:
+                    return
+            else:
+                await self._async_put(path_segs, body, write_href, on_retry=_rearm, retry=retry)
             if (
                 remote_control_off
                 and not write_only
@@ -2962,8 +2988,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         on_retry: Callable[[], None] | None = None,
         *,
         retry: bool = True,
-    ) -> None:
-        """PUT `body`; only retry a failed write when repeating it is safe."""
+        prepare_body: Callable[[], dict | None] | None = None,
+    ) -> bool:
+        """PUT `body`; prepare time-sensitive commands after acquiring the session."""
 
         def _do_put():
             if self._session is None:
@@ -2980,6 +3007,13 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # to be silently lost -- no retry, no user-facing error.
         async with self._session_lock:
             try:
+                if prepare_body is not None:
+                    if self._session is None:
+                        await self.hass.async_add_executor_job(self._connect_session)
+                    prepared = prepare_body()
+                    if prepared is None:
+                        return False
+                    body = prepared
                 code, response = await self.hass.async_add_executor_job(_do_put)
             except Exception as e:
                 self._log.warning("command failed for %s: %s", write_href, e)
@@ -3021,6 +3055,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 translation_key="command_refused",
                 translation_placeholders={"href": write_href, "error": _refusal(code, response)},
             )
+        return True
 
     # ------------------------------------------------------------------
     # Oven and microwave cook start (issue #473). See cook.py.
