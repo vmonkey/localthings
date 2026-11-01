@@ -208,6 +208,12 @@ class WaterHeaterDesc(SamsungEntityDescription):
 
 
 @dataclass(frozen=True, kw_only=True)
+class UpdateDesc(SamsungEntityDescription):
+    # Read-only: no install request is known to work on the soundbar.
+    pass
+
+
+@dataclass(frozen=True, kw_only=True)
 class MediaPlayerDesc(SamsungEntityDescription):
     # Binds the playback resource and reads power/volume/source/track from
     # siblings; write_fn maps (kind, value) -> (path_segs, body), like ClimateDesc.
@@ -223,6 +229,7 @@ PLATFORM_OF: dict[type, str] = {
     ButtonDesc: "button",
     NumberDesc: "number",
     TimeDesc: "time",
+    UpdateDesc: "update",
     ClimateDesc: "climate",
     FanDesc: "fan",
     WaterHeaterDesc: "water_heater",
