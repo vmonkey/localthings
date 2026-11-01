@@ -47,6 +47,15 @@ def is_placeholder_serial(serial: str) -> bool:
     return len(upper) >= 8 and len(set(upper)) == 1 and upper[0] in "0123456789ABCDEF"
 
 
+def resolve_firmware(identity: DeviceIdentity | None) -> str | None:
+    """/oic/p's manufacturer firmware version (mnfv), if reported."""
+    platform = identity.raw.get("/oic/p") if identity else None
+    mnfv = platform.get("mnfv") if isinstance(platform, dict) else None
+    if not isinstance(mnfv, str):
+        return None
+    return mnfv.strip() or None
+
+
 def resolve_serial(raw_serial: str | None, host: str) -> str:
     """The device identity to mint registry keys from.
 
@@ -55,10 +64,13 @@ def resolve_serial(raw_serial: str | None, host: str) -> str:
     host, which is stable per install and unique across devices on one
     network -- see is_placeholder_serial for the two families that need it.
     """
+    return display_serial(raw_serial) or host
+
+
+def display_serial(raw_serial: str | None) -> str | None:
+    """The device-reported serial, or None if it is missing or a placeholder."""
     s = (raw_serial or "").strip()
-    if not s or is_placeholder_serial(s):
-        return host
-    return s
+    return None if not s or is_placeholder_serial(s) else s
 
 
 def is_usable_device_id(value: str | None) -> bool:
