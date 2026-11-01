@@ -470,7 +470,20 @@ class LocalThingsMediaPlayer(LocalThingsEntity, MediaPlayerEntity):
             async with self.coordinator.playback.async_change():
                 await self.coordinator.async_send_command(self._bound, (kind, value))
             return
-        await self.coordinator.async_send_command(self._bound, (kind, value))
+        optimistic_body = None
+        if kind == "playback" and value in ("play", "pause"):
+            optimistic_body = self._playback_optimistic_body(value)
+        await self.coordinator.async_send_command(
+            self._bound, (kind, value), optimistic_body=optimistic_body
+        )
+
+    def _playback_optimistic_body(self, mode: str) -> dict:
+        body: dict = {"modes": [mode]}
+        # An optimistic mode cannot make an AirPlay/BT feed's stale position
+        # usable. Wait for the device to report a position again.
+        if self._playback_position_ms() is None:
+            body["position"] = None
+        return body
 
     async def async_turn_on(self) -> None:
         await self._send("power", True)
@@ -504,7 +517,9 @@ class LocalThingsMediaPlayer(LocalThingsEntity, MediaPlayerEntity):
         # The cache gets the mode it toggles to: "playpause" is no state.
         toggled = "pause" if self.state == MediaPlayerState.PLAYING else "play"
         await self.coordinator.async_send_command(
-            self._bound, ("playback", "playpause"), optimistic_body={"modes": [toggled]}
+            self._bound,
+            ("playback", "playpause"),
+            optimistic_body=self._playback_optimistic_body(toggled),
         )
 
     async def async_media_next_track(self) -> None:

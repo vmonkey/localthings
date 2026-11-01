@@ -2896,7 +2896,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
         try:
-            await self._async_put(path_segs, body, write_href, on_retry=_rearm)
+            retry = not (
+                isinstance(desc, MediaPlayerDesc)
+                and isinstance(payload, tuple)
+                and (
+                    payload[0] in ("seek", "next_track", "previous_track")
+                    or payload == ("playback", "playpause")
+                )
+            )
+            await self._async_put(path_segs, body, write_href, on_retry=_rearm, retry=retry)
             if (
                 remote_control_off
                 and not write_only
@@ -2952,9 +2960,10 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         body: dict | list,
         write_href: str,
         on_retry: Callable[[], None] | None = None,
+        *,
+        retry: bool = True,
     ) -> None:
-        """PUT `body`, reconnecting and retrying once on a dead session.
-        Raises HomeAssistantError if the retry fails too."""
+        """PUT `body`; only retry a failed write when repeating it is safe."""
 
         def _do_put():
             if self._session is None:
@@ -2973,7 +2982,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 code, response = await self.hass.async_add_executor_job(_do_put)
             except Exception as e:
-                self._log.warning("command failed for %s, reconnecting: %s", write_href, e)
+                self._log.warning("command failed for %s: %s", write_href, e)
                 await self.hass.async_add_executor_job(self._close_session)
                 # The session is dead the moment it's closed, so any OBSERVE
                 # subscriptions on it are too -- downgrade here, before the
@@ -2984,6 +2993,14 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._observe.mode == MODE_OBSERVE:
                     self._observe.downgrade_to_poll()
                     self._resubscribe_due = True
+                # A lost reply may follow a successful relative seek or toggle;
+                # resending it would apply the action twice.
+                if not retry:
+                    raise HomeAssistantError(
+                        translation_domain=DOMAIN,
+                        translation_key="command_failed",
+                        translation_placeholders={"href": write_href, "error": str(e)},
+                    ) from e
                 await asyncio.sleep(self._RECONNECT_PAUSE_S)
                 try:
                     code, response = await self.hass.async_add_executor_job(_do_put)
