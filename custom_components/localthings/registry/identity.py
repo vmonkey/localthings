@@ -253,12 +253,23 @@ def resolve_mac(resources: dict[str, dict]) -> str | None:
     field of an appliance's own state that a DHCP sighting can be matched
     against: Home Assistant hands discovery an (ip, hostname, mac) triple,
     and neither of the other two identifies a unit -- three of issue #469's
-    air conditioners share one hostname.
+    air conditioners share one hostname. A soundbar reports its MAC in its
+    deviceinfo resource instead.
 
     Roughly half the dumps in tests/fixtures carry the resource at all, so
     None is an ordinary answer here, not a fault.
     """
-    raw = (resources.get(WIRELESS_INFO_HREF) or {}).get("macaddressWiFi")
+    for href, key in (
+        (WIRELESS_INFO_HREF, "macaddressWiFi"),
+        ("/sec/networkaudio/deviceinfo", "x.com.samsung.networkaudio.wifimac"),
+    ):
+        if (found := _normalized_mac((resources.get(href) or {}).get(key))) is not None:
+            return found
+    return None
+
+
+def _normalized_mac(raw) -> str | None:
+    """One candidate MAC in HA's colon form, or None if unusable."""
     if not isinstance(raw, str):
         return None
     digits = raw.strip().lower().replace(":", "").replace("-", "").replace(".", "")
