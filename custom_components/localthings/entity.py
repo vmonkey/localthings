@@ -57,6 +57,8 @@ def _is_included(
     )
     if rep is None:
         return False
+    if bound.desc.requires_href and not coordinator.has_href(bound.desc.requires_href):
+        return False
     if bound.desc.exists_fn is not None:
         canonical = coordinator.canonical_resources if live else coordinator.discovery_canonical
         return bound.desc.exists_fn(rep, canonical(bound.subdevice))

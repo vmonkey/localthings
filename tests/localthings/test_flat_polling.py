@@ -325,6 +325,19 @@ def test_flat_liveness_without_an_answer_fails_the_cycle(hass: HomeAssistant, mo
         coordinator._poll_once()
 
 
+def test_advertised_hrefs_survive_a_reconnect_without_identity(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """Write-only hrefs are known only from /oic/res; a reconnect whose
+    identity read failed must not make them unsupported."""
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._last_oic_res = _AV_LINKS
+    coordinator._identity = _identity(links=[])  # the reconnect's /oic/res read failed
+
+    assert coordinator.has_href("/sec/switch/binary")
+    assert not coordinator.has_href("/sec/tv/nothing")
+
+
 def test_flat_reads_keep_no_wifi_secrets_or_onboarding_tokens() -> None:
     links = [{"href": h} for h in ("/WiFiConfResURI", "/CoapCloudConfResURI", "/sec/audio")]
     assert flat_hrefs(links) == ["/WiFiConfResURI", "/sec/audio"]
@@ -449,68 +462,167 @@ async def test_flat_subpolls_rotate_so_no_href_is_starved(hass: HomeAssistant, m
     assert set(budgets) == {2 * coordinator._FLAT_TIMEOUT_S + 4 * coordinator._FLAT_READ_S}
 
 
+# ---------------------------------------------------------------------------
+# A TV in network standby, and discovery keeping what didn't answer
+# ---------------------------------------------------------------------------
+
+_TV_SWITCH = "/sec/tv/switch/binary"
+_TV_LINKS = [
+    {"href": "/oic/d", "rt": ["oic.wk.d"]},
+    {"href": _TV_SWITCH, "rt": ["oic.r.switch.binary"]},
+    {"href": "/sec/tv/audio", "rt": ["oic.r.audio"]},
+    {"href": "/sec/tv/channel", "rt": ["x.com.samsung.tv.channel"]},
+]
+# What a TV dozing in network standby answers: everything but its switch.
+_TV_STANDBY = {"/sec/tv/audio": {"volume": 9}, "/sec/tv/channel": {"name": "One"}}
+_TV_ON = {**_TV_STANDBY, _TV_SWITCH: {"value": True}}
+
+
+def _tv(hass: HomeAssistant, mock_entry, resources: dict) -> LocalThingsCoordinator:
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator.device_type_name = "tv"
+    coordinator._flat = coordinator._read_mode_checked = True
+    coordinator._identity = _identity(_TV_LINKS, ("oic.wk.d", "oic.d.tv"))
+    coordinator._session = cast(Any, FakeFlatSession(resources=resources, links=_TV_LINKS))
+    return coordinator
+
+
+def _discovered_tv(hass: HomeAssistant, mock_entry, resources: dict) -> LocalThingsCoordinator:
+    from types import SimpleNamespace
+
+    coordinator = _tv(hass, mock_entry, resources)
+    coordinator._discovered = True
+    coordinator._hot_hrefs = [_TV_SWITCH]
+    coordinator.bound = cast(
+        Any, [SimpleNamespace(href=_TV_SWITCH), SimpleNamespace(href="/sec/tv/audio")]
+    )
+    return coordinator
+
+
+def test_a_tv_in_network_standby_is_not_discovered(hass: HomeAssistant, mock_entry) -> None:
+    """Most of it answers, so the half rule alone would discover it, without
+    the entities on its power switch."""
+    coordinator = _tv(hass, mock_entry, _TV_STANDBY)
+    with pytest.raises(RuntimeError, match="no resource answered"):
+        coordinator._poll_once()
+
+    coordinator._session = cast(Any, FakeFlatSession(resources=_TV_ON, links=_TV_LINKS))
+    assert coordinator._poll_once() == _TV_ON
+
+
+def test_a_family_without_an_awake_href_needs_only_half(hass: HomeAssistant, mock_entry) -> None:
+    coordinator = _tv(hass, mock_entry, _TV_STANDBY)
+    coordinator.device_type_name = "soundbar"
+    assert coordinator._poll_once() == _TV_STANDBY
+
+
+def test_the_liveness_read_of_a_tv_is_its_switch(hass: HomeAssistant, mock_entry) -> None:
+    """Off the full-sweep cadence the switch is the one GET, and its answer is
+    kept; a TV answering /oic/d but not it is in standby, so off."""
+    coordinator = _discovered_tv(hass, mock_entry, _TV_ON)
+    assert coordinator._poll_once() == {_TV_SWITCH: {"value": True}}
+    sess = cast(FakeFlatSession, coordinator._session)
+    assert sess.reads == [_TV_SWITCH]
+
+    coordinator._session = cast(Any, FakeFlatSession(resources=_TV_STANDBY, links=_TV_LINKS))
+    with pytest.raises(RuntimeError, match="liveness"):
+        coordinator._poll_once()
+
+
+def test_a_full_sweep_without_the_switch_fails(hass: HomeAssistant, mock_entry) -> None:
+    """The sweep after failed cycles reads the (hot) switch as well, and a TV
+    that answers everything else stays off."""
+    coordinator = _discovered_tv(hass, mock_entry, _TV_STANDBY)
+    coordinator._failed_cycles = 1
+    with pytest.raises(RuntimeError, match="network standby"):
+        coordinator._poll_once()
+
+    coordinator._session = cast(Any, FakeFlatSession(resources=_TV_ON, links=_TV_LINKS))
+    assert coordinator._poll_once() == {
+        "/sec/tv/audio": {"volume": 9},
+        _TV_SWITCH: {"value": True},
+    }
+
+
+def test_the_switch_is_not_required_once_nothing_is_bound_to_it(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    from types import SimpleNamespace
+
+    coordinator = _discovered_tv(hass, mock_entry, _TV_STANDBY)
+    coordinator.bound = cast(Any, [SimpleNamespace(href="/sec/tv/audio")])
+    coordinator._failed_cycles = 1
+    assert coordinator._poll_once() == {"/sec/tv/audio": {"volume": 9}}
+
+
 async def test_flat_discovery_keeps_what_did_not_answer_this_time(
     hass: HomeAssistant, mock_entry
 ) -> None:
     """An href that missed this read keeps its entities from the last
     snapshot, without its old value reaching the state cache; one /oic/res
     no longer advertises is let go."""
-    coordinator = LocalThingsCoordinator(hass, mock_entry)
-    coordinator._flat = True
-    coordinator._identity = _identity(_AV_LINKS)
+    coordinator = _tv(hass, mock_entry, _TV_STANDBY)
     await coordinator._snapshot_store.async_save(
         {
             "resources": {
-                "/sec/switch/binary": {"value": False},
-                "/sec/audio": {"volume": 1},
-                "/sec/gone": {"value": 1},
+                _TV_SWITCH: {"value": False},
+                "/sec/tv/audio": {"volume": 1},
+                "/sec/tv/gone": {"value": 1},
             },
             "subdevice_candidates": [],
             "identity": None,
         }
     )
-    live = {"/sec/audio": {"volume": 9}}
+    live = {"/sec/tv/audio": {"volume": 9}}
 
     found = await coordinator._with_remembered_resources(live)
 
-    assert found == {"/sec/switch/binary": {"value": False}, "/sec/audio": {"volume": 9}}
-    coordinator._observe.apply("/sec/audio", {"volume": 9}, source="poll")
+    assert found == {_TV_SWITCH: {"value": False}, "/sec/tv/audio": {"volume": 9}}
+    coordinator._observe.apply("/sec/tv/audio", {"volume": 9}, source="poll")
     assert coordinator.discovery_resources == found
-    assert "/sec/switch/binary" not in coordinator.last_resources
+    assert _TV_SWITCH not in coordinator.last_resources
 
 
 async def test_flat_discovery_without_a_snapshot_is_the_live_read(
     hass: HomeAssistant, mock_entry
 ) -> None:
-    coordinator = LocalThingsCoordinator(hass, mock_entry)
-    coordinator._flat = True
-    coordinator._identity = _identity(_AV_LINKS)
-    assert await coordinator._with_remembered_resources(_RESOURCES) == _RESOURCES
+    coordinator = _tv(hass, mock_entry, _TV_ON)
+    assert await coordinator._with_remembered_resources(_TV_ON) == _TV_ON
     assert coordinator.discovery_resources == coordinator.last_resources
 
 
-async def test_a_first_flat_cycle_banks_what_did_not_answer(
+async def test_a_first_cycle_missing_the_switch_still_binds_the_media_player(
     hass: HomeAssistant, mock_entry
 ) -> None:
-    """End to end: the new snapshot carries the remembered rep, the state
-    cache only what answered."""
+    """End to end: discovery and the new snapshot carry the remembered
+    switch, the state cache only what answered."""
     from unittest.mock import patch
 
-    coordinator = LocalThingsCoordinator(hass, mock_entry)
-    coordinator._flat = True
-    coordinator._identity = _identity(_AV_LINKS)
+    coordinator = _tv(hass, mock_entry, {})
     switch = {"rt": ["oic.r.switch.binary"], "value": False}
     await coordinator._snapshot_store.async_save(
-        {"resources": {"/sec/switch/binary": switch}, "subdevice_candidates": [], "identity": None}
+        {"resources": {_TV_SWITCH: switch}, "subdevice_candidates": [], "identity": None}
     )
+    live = {"/sec/tv/audio": {"volume": 9}}
 
     with (
-        patch.object(coordinator, "_poll_once", return_value={"/sec/audio": {"volume": 9}}),
+        patch.object(coordinator, "_poll_once", return_value=live),
         patch.object(coordinator, "_attempt_observe_mode"),
     ):
         await coordinator._async_update_data()
 
-    assert "/sec/switch/binary" not in coordinator.last_resources
+    assert _TV_SWITCH in {bound.href for bound in coordinator.bound}
+    assert _TV_SWITCH not in coordinator.last_resources
     stored = await coordinator._snapshot_store.async_load()
     assert stored is not None
-    assert stored["resources"]["/sec/switch/binary"] == switch
+    assert stored["resources"][_TV_SWITCH] == switch
+
+
+def test_setup_probe_of_a_tv_in_network_standby_is_unusable() -> None:
+    class _TvBoard(FakeFlatSession):
+        _OIC_D: ClassVar[dict] = {**FakeFlatSession._OIC_D, "rt": ["oic.wk.d", "oic.d.tv"]}
+
+    with pytest.raises(UnexpectedResponse):
+        _read_device(_TvBoard(resources=_TV_STANDBY, links=_TV_LINKS), "10.0.0.99", 49154)
+    info = _read_device(_TvBoard(resources=_TV_ON, links=_TV_LINKS), "10.0.0.99", 49154)
+    assert info["device_type_name"] == "tv"
